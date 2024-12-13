@@ -1,12 +1,15 @@
 import torch
 import gc
 import os
+import json
 import random
 import numpy as np
 
 from datetime import datetime
-
 from jaxtyping import Float
+
+def grad_norm(grad: Float[torch.Tensor, "..."]):
+    return grad.norm(p=2).detach().cpu().item()
 
 def decode_latent(guidance, latent, device):
     latent = latent.detach().to(device)
@@ -22,15 +25,18 @@ def cleanup():
     torch.cuda.empty_cache()
 
 def setup(args):
-    save_dir = "results/%s_gen/%s_lr%.3f_seed%d_scale%.1f/%s" % (args.mode, args.prompt.replace(" ", "_"), args.lr,
-        args.seed, args.cfg_scale, datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    )
+    save_dir = "results/%s/%s/%s" % (args.mode, args.prompt.replace(" ", "_"), datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
     debug_dir = os.path.join(save_dir, 'debug')
     cache_dir = '.cache'
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(debug_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
     print("Save dir:", save_dir)
+
+    config_path = os.path.join(save_dir, 'config.json')
+
+    with open(config_path, 'w') as file:
+        json.dump(vars(args), file)
 
     return save_dir, debug_dir, cache_dir
 

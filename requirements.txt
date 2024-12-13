@@ -6,3 +6,4 @@ jaxtyping
 tqdm
 numpy
 imageio[pyav]
+xformers
