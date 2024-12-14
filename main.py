@@ -19,11 +19,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--prompt", type=str, default="a DSLR photo of a dolphin")
 parser.add_argument("--extra_src_prompt", type=str, default=", oversaturated, smooth, pixelated, cartoon, foggy, hazy, blurry, bad structure, noisy, malformed")
 parser.add_argument("--extra_tgt_prompt", type=str, default=", detailed high resolution, high quality, sharp")
-parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "jsd"])
+parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "jsd", "lucid"])
 parser.add_argument("--cfg_scale", type=float, default=100)
 parser.add_argument("--lr", type=float, default=0.01)
 parser.add_argument("--nc", type=int, default=1)
 parser.add_argument("--ds", type=float, default=1)
+parser.add_argument("--deltat", type=int, default=80)
+parser.add_argument("--deltas", type=int, default=200)
 
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--n_steps", type=int, default=1000)
@@ -75,6 +77,8 @@ for step in tqdm(range(args.n_steps)):
         lora_optimizer.zero_grad()
     elif args.mode == "jsd":
         loss_dict = guidance.jsd_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, num_complement_prompt=args.nc, diverse_scale=args.ds)
+    elif args.mode == "lucid":
+        loss_dict = guidance.lucid_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, delta_t=args.deltat, delta_s=args.deltas)
     else:
         raise ValueError(args.mode)
     

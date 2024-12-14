@@ -11,14 +11,14 @@ from diffusers.models.embeddings import TimestepEmbedding
 from jaxtyping import Float
 
 from utils import *
-
+from lucid_utils import ddim_step
 
 @dataclass
 class GuidanceConfig:
     sd_pretrained_model_or_path: str = "runwayml/stable-diffusion-v2-1-base"
     sd_pretrained_model_or_path_lora: str = "stabilityai/stable-diffusion-2-1"
 
-    num_inference_steps: int = 500
+    num_inference_steps: int = 1000
     min_step_ratio: float = 0.02
     max_step_ratio: float = 0.98
 
@@ -45,6 +45,8 @@ class Guidance(object):
         self.scheduler = DDIMScheduler.from_config(self.pipe.scheduler.config)
         self.scheduler.set_timesteps(config.num_inference_steps)
         self.pipe.scheduler = self.scheduler
+        self.timesteps = torch.flip(self.scheduler.timesteps, dims=(0, ))
+        self.scheduler.alphas_cumprod = self.scheduler.alphas_cumprod.to(self.device)
 
         self.unet = self.pipe.unet
         self.tokenizer = self.pipe.tokenizer
@@ -171,6 +173,26 @@ class Guidance(object):
         t_prev = timesteps[idx - 1].cpu()
 
         return t, t_prev
+
+    def sample_lucid_timestep(self, batch_size, delta_t, delta_s):
+        self.scheduler.set_timesteps(self.config.num_inference_steps)
+        timesteps = reversed(self.scheduler.timesteps)
+
+        min_step = 1 if self.config.min_step_ratio <= 0 else int(len(timesteps) * self.config.min_step_ratio)
+        max_step = len(timesteps) if self.config.max_step_ratio >= 1 else int(len(timesteps) * self.config.max_step_ratio)
+        max_step = max(max_step, min_step + 1)
+        
+        idx_t = torch.randint(min_step, max_step, [batch_size], dtype=torch.long, device="cpu")
+        idx_s = max(idx_t - delta_t, torch.ones_like(idx_t) * 0)
+        
+        t = timesteps[idx_t].cpu()
+        t_prev = timesteps[idx_s].cpu()
+
+        n = int(np.ceil(idx_s / delta_s))
+
+        starting_ind = max(idx_s - delta_s * n, torch.ones_like(idx_t) * 0)
+
+        return idx_t, idx_s, t, t_prev, n, starting_ind
 
     def sds_loss(self, im, prompt=None, cfg_scale=100, noise=None):
         device = self.device
@@ -439,6 +461,109 @@ class Guidance(object):
 
         return {"grad": grad, "t": t}
 
+    def lucid_loss(self, im, prompt=None, cfg_scale=100, delta_t=1, delta_s=1):
+
+        device = self.device
+        scheduler = self.scheduler
+
+        self.update_text_features(tgt_prompt=prompt)
+        tgt_text_embedding = self.tgt_text_feature
+        uncond_embedding = self.null_text_feature
+
+        batch_size = im.shape[0]
+        idx_t, idx_s, t, t_prev, n, starting_ind = self.sample_lucid_timestep(batch_size, delta_t, delta_s)
+        
+        with torch.no_grad():
+            
+            noise = torch.randn_like(im)
+
+            prev_noisy_lat = scheduler.add_noise(im, noise, t)
+
+            cur_ind_t = starting_ind
+            cur_noisy_lat = prev_noisy_lat
+
+            pred_scores = []
+
+            for i in range(n):
+                cur_noisy_lat_ = scheduler.scale_model_input(cur_noisy_lat, self.timesteps[cur_ind_t]).to(self.device)
+
+                latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
+                text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
+                unet_output = self.unet.forward(
+                    latent_model_input, 
+                    torch.cat([self.timesteps[cur_ind_t]] * 2).to(device), 
+                    encoder_hidden_states=text_embeddings
+                ).sample
+
+                cond, uncond= unet_output.chunk(2)
+
+                unet_output = cond + cfg_scale * (uncond - cond) #inverse cfg
+                # unet_output = cond + cfg_scale * (cond - uncond)
+
+                pred_scores.append((cur_ind_t, unet_output))
+
+                next_ind_t = min(cur_ind_t + delta_s, idx_s)
+                cur_t, next_t = self.timesteps[cur_ind_t], self.timesteps[next_ind_t]
+                delta_t_ = next_t-cur_t if isinstance(scheduler, DDIMScheduler) else next_ind_t-cur_ind_t
+
+                cur_noisy_lat = ddim_step(scheduler, unet_output, cur_t, cur_noisy_lat, -delta_t_, 0.0).prev_sample
+                cur_ind_t = next_ind_t
+
+                del unet_output
+                torch.cuda.empty_cache()
+
+                if cur_ind_t == idx_s:
+                    break
+            
+            pred_scores_xs = pred_scores[::-1]
+
+            cur_ind_t = idx_s
+
+            cur_noisy_lat_ = scheduler.scale_model_input(cur_noisy_lat, self.timesteps[cur_ind_t]).to(self.device)
+
+            latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
+            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
+            unet_output = self.unet.forward(
+                latent_model_input, 
+                torch.cat([self.timesteps[idx_s]] * 2).to(device), 
+                encoder_hidden_states=text_embeddings
+            ).sample
+
+            cond, uncond = unet_output.chunk(2)
+            unet_output = cond + cfg_scale * (uncond - cond) #inverse cfg
+            # unet_output = cond + cfg_scale * (cond - uncond)
+            pred_scores = [(cur_ind_t, unet_output)]
+
+            next_ind_t = min(cur_ind_t + delta_t, idx_t)
+            cur_t, next_t = self.timesteps[cur_ind_t], self.timesteps[next_ind_t]
+            delta_t_ = next_t-cur_t if isinstance(scheduler, DDIMScheduler) else next_ind_t-cur_ind_t
+
+            cur_noisy_lat = ddim_step(scheduler, unet_output, cur_t, cur_noisy_lat, -delta_t_, 0.0).prev_sample
+            cur_ind_t = next_ind_t
+
+            pred_scores = pred_scores + pred_scores_xs
+            target = pred_scores[0][1]
+
+            cur_noisy_lat = scheduler.scale_model_input(cur_noisy_lat, t)
+            latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
+
+            unet_output = self.unet(
+                latent_model_input, 
+                torch.cat([t] * 2).to(device), 
+                encoder_hidden_states=text_embeddings
+            ).sample
+
+            cond, uncond = unet_output.chunk(2)
+            delta_DSD = cond - uncond
+        
+        pred_noise = uncond + cfg_scale * delta_DSD
+
+        alphas = scheduler.alphas_cumprod[idx_t].to(device)
+        w = (((1 - alphas) / alphas) ** 0.5)
+
+        grad = w * (pred_noise - target)
+        grad = torch.nan_to_num(grad)
+        return {"grad": grad, "t": t}
 
     def train_lora_vsd(self, latents: Float[torch.Tensor, "B 4 64 64"], text_embeddings: Float[torch.Tensor, "BB 77 768"], camera_condition: Float[torch.Tensor, "B 4 4"]):
         scheduler = self.scheduler_lora
