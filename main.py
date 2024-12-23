@@ -13,8 +13,6 @@ from tqdm import tqdm
 from utils import *
 from stats import *
 
-device = torch.device("cuda")
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--prompt", type=str, default="a DSLR photo of a dolphin")
 parser.add_argument("--extra_src_prompt", type=str, default=", oversaturated, smooth, pixelated, cartoon, foggy, hazy, blurry, bad structure, noisy, malformed")
@@ -27,12 +25,15 @@ parser.add_argument("--deltat", type=int, default=80)
 parser.add_argument("--deltas", type=int, default=200)
 parser.add_argument("--numt", type=int, default=2)
 
+parser.add_argument("--didx", type=int, default=0)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--n_steps", type=int, default=5000)
 parser.add_argument("--stage_two_start_step", type=int, default=500)
 parser.add_argument("--snap", type=int, default=100)
 parser.add_argument("--fps", type=int, default=10)
 args = parser.parse_args()
+
+device = torch.device("cuda", args.didx)
 
 save_dir, debug_dir, cache_dir = setup(args=args)
 
