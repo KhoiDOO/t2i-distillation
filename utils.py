@@ -25,7 +25,7 @@ def cleanup():
     torch.cuda.empty_cache()
 
 def setup(args):
-    save_dir = "results/%s/%s/%s" % (args.mode, args.prompt.replace(" ", "_"), datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
+    save_dir = "results/%s/%s/%s/%s" % (args.mode, args.prompt.replace(" ", "_"), f'seed_{args.seed}', datetime.now().strftime("%Y_%m_%d_%H_%M_%S"))
     debug_dir = os.path.join(save_dir, 'debug')
     cache_dir = '.cache'
     os.makedirs(save_dir, exist_ok=True)
@@ -55,3 +55,7 @@ class ToWeightsDType(torch.nn.Module):
 
     def forward(self, x: Float[torch.Tensor, "..."]) -> Float[torch.Tensor, "..."]:
         return self.module(x).to(self.dtype)
+
+def coeffs(n):
+    nums = torch.randn(n)
+    return nums / torch.sum(nums)

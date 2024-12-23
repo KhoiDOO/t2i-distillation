@@ -242,6 +242,49 @@ class Guidance(object):
         grad = torch.nan_to_num(grad)
         return {"grad": grad, "t": t}
 
+    def jsdg_loss(self, im, prompt=None, cfg_scale=100, nt=5):
+        device = self.device
+        scheduler = self.scheduler
+
+        # process text.
+        self.update_text_features(tgt_prompt=prompt)
+        tgt_text_embedding = self.tgt_text_feature
+        uncond_embedding = self.null_text_feature
+
+        batch_size = im.shape[0]
+        t, _ = self.sample_timestep(batch_size)
+
+        ts = [self.sample_timestep(batch_size)[0] for i in range(nt)]
+
+        noise = torch.randn_like(im)
+
+        latents_noisy = scheduler.add_noise(im, noise, t)
+        latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
+        text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
+        noise_pred = self.unet.forward(latent_model_input, torch.cat([t] * 2).to(device), encoder_hidden_states=text_embeddings).sample
+        noise_pred_text, noise_pred_uncond = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_text - noise_pred_uncond)
+
+        cs = coeffs(nt).to(self.device)
+
+        scores = 0
+        for i, _t in enumerate(ts):
+            latents_noisy = scheduler.add_noise(im, noise, _t)
+            latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
+            noise_pred = self.unet.forward(latent_model_input, torch.cat([_t] * 2).to(device), encoder_hidden_states=text_embeddings).sample
+            noise_pred_text, noise_pred_uncond = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_text - noise_pred_uncond)
+
+            scores += cs[i] * noise_pred - noise
+        
+        w = 1 - scheduler.alphas_cumprod[t].to(device)
+        alphas = scheduler.alphas_cumprod[t].to(device)
+        wp = (((1 - alphas) / alphas) ** 0.5)
+
+        grad = w * (noise_pred - noise) + wp * scores
+        grad = torch.nan_to_num(grad)
+        return {"grad": grad, "t": t}
+
     def sdsm_loss(self, im, prompt=None, cfg_scale=100, noise=None):
         device = self.device
         scheduler = self.scheduler
