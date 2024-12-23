@@ -19,11 +19,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--prompt", type=str, default="a DSLR photo of a dolphin")
 parser.add_argument("--extra_src_prompt", type=str, default=", oversaturated, smooth, pixelated, cartoon, foggy, hazy, blurry, bad structure, noisy, malformed")
 parser.add_argument("--extra_tgt_prompt", type=str, default=", detailed high resolution, high quality, sharp")
-parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "jsd", "lucid"])
+parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "lucid", "lucids"])
 parser.add_argument("--cfg_scale", type=float, default=100)
+parser.add_argument("--denoise_cfg_scale", type=float, default=1)
 parser.add_argument("--lr", type=float, default=0.01)
-parser.add_argument("--nc", type=int, default=1)
-parser.add_argument("--ds", type=float, default=1)
 parser.add_argument("--deltat", type=int, default=80)
 parser.add_argument("--deltas", type=int, default=200)
 
@@ -36,7 +35,7 @@ args = parser.parse_args()
 
 save_dir, debug_dir, cache_dir = setup(args=args)
 
-guidance = Guidance(GuidanceConfig(sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base"), use_lora=(args.mode == "vsd"))
+guidance = Guidance(GuidanceConfig(sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base", device=device), use_lora=(args.mode == "vsd"))
 
 stats_monitor = Stats(run_dir=save_dir)
 
@@ -75,10 +74,10 @@ for step in tqdm(range(args.n_steps)):
         lora_loss.backward()
         lora_optimizer.step()
         lora_optimizer.zero_grad()
-    elif args.mode == "jsd":
-        loss_dict = guidance.jsd_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, num_complement_prompt=args.nc, diverse_scale=args.ds)
+    elif args.mode == "lucids":
+        loss_dict = guidance.lucids_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, denoise_cfg_scale=args.denoise_cfg_scale, delta_t=args.deltat)
     elif args.mode == "lucid":
-        loss_dict = guidance.lucid_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, delta_t=args.deltat, delta_s=args.deltas)
+        loss_dict = guidance.lucid_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, denoise_cfg_scale=args.denoise_cfg_scale, delta_t=args.deltat, delta_s=args.deltas)
     else:
         raise ValueError(args.mode)
     

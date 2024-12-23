@@ -34,6 +34,8 @@ class GuidanceConfig:
     sync_noise_and_t: bool = True
     lora_cfg_training: bool = True
 
+    device: torch.device = torch.device("cuda")
+
 
 class Guidance(object):
     def __init__(self, config: GuidanceConfig, use_lora: bool = False):
@@ -166,11 +168,30 @@ class Guidance(object):
 
         min_step = 1 if self.config.min_step_ratio <= 0 else int(len(timesteps) * self.config.min_step_ratio)
         max_step = len(timesteps) if self.config.max_step_ratio >= 1 else int(len(timesteps) * self.config.max_step_ratio)
+
+        self.min_step = min_step
+        self.max_step = max_step
         
         max_step = max(max_step, min_step + 1)
         idx = torch.randint(min_step, max_step, [batch_size], dtype=torch.long, device="cpu")
         t = timesteps[idx].cpu()
         t_prev = timesteps[idx - 1].cpu()
+
+        return t, t_prev
+
+    def sample_lucids_timestep(self, batch_size, delta_t):
+        self.scheduler.set_timesteps(self.config.num_inference_steps)
+        timesteps = reversed(self.scheduler.timesteps)
+
+        min_step = 1 if self.config.min_step_ratio <= 0 else int(len(timesteps) * self.config.min_step_ratio)
+        max_step = len(timesteps) if self.config.max_step_ratio >= 1 else int(len(timesteps) * self.config.max_step_ratio)
+        max_step = max(max_step, min_step + 1)
+        
+        idx_t = torch.randint(min_step, max_step, [batch_size], dtype=torch.long, device="cpu")
+        idx_s = max(idx_t - delta_t, torch.ones_like(idx_t) * 0)
+        
+        t = timesteps[idx_t].cpu()
+        t_prev = timesteps[idx_s].cpu()
 
         return t, t_prev
 
@@ -380,94 +401,59 @@ class Guidance(object):
         loss_lora = self.train_lora_vsd(im, text_embeddings, camera_condition)
         return {"lora_loss": loss_lora, "grad": grad, "t": t}
     
-    def jsd_loss(self, im, prompt=None, cfg_scale=100, num_complement_prompt=1, diverse_scale=1):
+    def lucids_loss(self, im, prompt=None, cfg_scale=100, denoise_cfg_scale=1, delta_t=1):
         device = self.device
         scheduler = self.scheduler
 
-        # process text.
-        self.update_text_features(tgt_prompt=prompt)
-        tgt_text_embedding = self.tgt_text_feature
+        self.update_text_features(
+            src_prompt=prompt,
+            tgt_prompt="unrealistic, blurry, low quality, out of focus, ugly, low contrast, dull, low-resolution, oversaturation."
+        )
+        prompt_embedding = self.src_text_feature
+        negative_embedding = self.tgt_text_feature
         uncond_embedding = self.null_text_feature
 
         batch_size = im.shape[0]
-        camera_condition = torch.zeros([batch_size, 4, 4], device=device)
+
+        t, t_prev = self.sample_lucids_timestep(batch_size, delta_t)
+
+        noise = torch.randn_like(im)
+
+        curr_latent = scheduler.add_noise(im, noise, t)
+        prev_latent = scheduler.add_noise(im, noise, t_prev)
+
+        curr_latent_input = torch.cat([curr_latent] * 2, dim=0)
+        prev_latent_input = torch.cat([prev_latent] * 2, dim=0)
 
         with torch.no_grad():
-            # random timestamp
-            t, _ = self.sample_timestep(batch_size)
-
-            noise = torch.randn_like(im)
-
-            latents_noisy = scheduler.add_noise(im, noise, t)
-            latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
-            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
-            with self.disable_unet_class_embedding(self.unet) as unet:
-                cross_attention_kwargs = None
-                noise_pred_positive = unet.forward(latent_model_input, torch.cat([t] * 2).to(device), encoder_hidden_states=text_embeddings,
-                    cross_attention_kwargs=cross_attention_kwargs)
-
-        (noise_pred_positive_text, noise_pred_positive_uncond) = noise_pred_positive.sample.chunk(2)
-
-        noise_pred_positive = noise_pred_positive_uncond + cfg_scale * (noise_pred_positive_text - noise_pred_positive_uncond)
-
-        alphas_cumprod = None
-        alpha_t = None
-        sigma_t = None
-        assert self.scheduler.config.prediction_type == "epsilon"
-        if self.scheduler.config.prediction_type == "v_prediction":
-            alphas_cumprod = self.scheduler.alphas_cumprod.to(device=latents_noisy.device, dtype=latents_noisy.dtype)
-            alpha_t = alphas_cumprod[t] ** 0.5
-            sigma_t = (1 - alphas_cumprod[t]) ** 0.5
-
-        noise_pred_comple_lst = []
-        for i in range(num_complement_prompt):
-            
-            pertubed_tgt_text_embedding = tgt_text_embedding + diverse_scale * torch.randn_like(tgt_text_embedding)
-            pertubed_text_embeddings = torch.cat([pertubed_tgt_text_embedding, uncond_embedding], dim=0)
-            
-            with torch.no_grad():
-                noise_pred_complement = unet.forward(
-                    latent_model_input, 
-                    torch.cat([t] * 2).to(device), 
-                    encoder_hidden_states=pertubed_text_embeddings,
-                    class_labels=torch.cat(
-                        [
-                            camera_condition.view(batch_size, -1),
-                            camera_condition.view(batch_size, -1),
-                        ],
-                        dim=0,
-                    ),
-                    cross_attention_kwargs={"scale": 1.0}
-                ).sample
-            if None not in [alphas_cumprod, alpha_t, sigma_t]:
-                noise_pred_complement = (
-                    latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) 
-                    + 
-                    noise_pred_complement * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
-                )
-            
-            (noise_pred_complement_text, noise_pred_complement_uncond) = noise_pred_complement.chunk(2)
-
-            noise_pred_complement = noise_pred_complement_text + cfg_scale * (noise_pred_complement_text - noise_pred_complement_uncond)
-
-            noise_pred_comple_lst.append(noise_pred_complement)
+            curr_text_embeddings = torch.cat([prompt_embedding, uncond_embedding], dim=0)
+            curr_noise_pred = self.unet.forward(curr_latent_input, torch.cat([t] * 2).to(device), encoder_hidden_states=curr_text_embeddings).sample
+            noise_pred_prompt, noise_pred_uncond = curr_noise_pred.chunk(2)
+            curr_noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_prompt - noise_pred_uncond)
         
-        aggreated_noise_pred_comple = torch.sum(torch.cat(noise_pred_comple_lst, dim = 0), dim = 0)
+            prev_text_embeddings = torch.cat([negative_embedding, uncond_embedding], dim=0)
+            prev_noise_pred = self.unet.forward(prev_latent_input, torch.cat([t_prev] * 2).to(device), encoder_hidden_states=prev_text_embeddings).sample
+            noise_pred_negative, noise_pred_uncond = prev_noise_pred.chunk(2)
+            prev_noise_pred = noise_pred_uncond + denoise_cfg_scale * (noise_pred_negative - noise_pred_uncond)
 
-        w = (1 - scheduler.alphas_cumprod[t.cpu()]).view(-1, 1, 1, 1).to(device)
-        grad = w * (noise_pred_positive - aggreated_noise_pred_comple)
+        alphas = scheduler.alphas_cumprod[t].to(device)
+        w = (((1 - alphas) / alphas) ** 0.5)
 
+        grad = w * (curr_noise_pred - prev_noise_pred)
         grad = torch.nan_to_num(grad)
-
         return {"grad": grad, "t": t}
 
-    def lucid_loss(self, im, prompt=None, cfg_scale=100, delta_t=1, delta_s=1):
+    def lucid_loss(self, im, prompt=None, cfg_scale=100, denoise_cfg_scale=1, delta_t=1, delta_s=1):
 
         device = self.device
         scheduler = self.scheduler
 
-        self.update_text_features(tgt_prompt=prompt)
-        tgt_text_embedding = self.tgt_text_feature
+        self.update_text_features(
+            src_prompt=prompt,
+            tgt_prompt="unrealistic, blurry, low quality, out of focus, ugly, low contrast, dull, low-resolution, oversaturation."
+        )
+        prompt_embedding = self.src_text_feature
+        negative_embedding = self.tgt_text_feature
         uncond_embedding = self.null_text_feature
 
         batch_size = im.shape[0]
@@ -488,17 +474,18 @@ class Guidance(object):
                 cur_noisy_lat_ = scheduler.scale_model_input(cur_noisy_lat, self.timesteps[cur_ind_t]).to(self.device)
 
                 latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
-                text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
                 unet_output = self.unet.forward(
                     latent_model_input, 
                     torch.cat([self.timesteps[cur_ind_t]] * 2).to(device), 
-                    encoder_hidden_states=text_embeddings
+                    encoder_hidden_states=torch.cat(
+                        [negative_embedding, uncond_embedding], 
+                        dim=0
+                    )
                 ).sample
 
-                cond, uncond= unet_output.chunk(2)
+                negative_cond, null_cond = unet_output.chunk(2)
 
-                unet_output = cond + cfg_scale * (uncond - cond) #inverse cfg
-                # unet_output = cond + cfg_scale * (cond - uncond)
+                unet_output = null_cond + denoise_cfg_scale * (negative_cond - null_cond) #inverse cfg
 
                 pred_scores.append((cur_ind_t, unet_output))
 
@@ -522,16 +509,17 @@ class Guidance(object):
             cur_noisy_lat_ = scheduler.scale_model_input(cur_noisy_lat, self.timesteps[cur_ind_t]).to(self.device)
 
             latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
-            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
             unet_output = self.unet.forward(
                 latent_model_input, 
                 torch.cat([self.timesteps[idx_s]] * 2).to(device), 
-                encoder_hidden_states=text_embeddings
+                encoder_hidden_states=torch.cat(
+                    [negative_embedding, uncond_embedding], 
+                    dim=0
+                )
             ).sample
 
-            cond, uncond = unet_output.chunk(2)
-            unet_output = cond + cfg_scale * (uncond - cond) #inverse cfg
-            # unet_output = cond + cfg_scale * (cond - uncond)
+            negative_cond, null_cond = unet_output.chunk(2)
+            unet_output = null_cond + denoise_cfg_scale * (negative_cond - null_cond) #inverse cfg
             pred_scores = [(cur_ind_t, unet_output)]
 
             next_ind_t = min(cur_ind_t + delta_t, idx_t)
@@ -548,15 +536,18 @@ class Guidance(object):
             latent_model_input = torch.cat([cur_noisy_lat_] * 2, dim=0)
 
             unet_output = self.unet(
-                latent_model_input, 
-                torch.cat([t] * 2).to(device), 
-                encoder_hidden_states=text_embeddings
+                latent_model_input,
+                torch.cat([t] * 2).to(device),
+                encoder_hidden_states=torch.cat(
+                    [prompt_embedding, negative_embedding], 
+                    dim=0
+                )
             ).sample
 
-            cond, uncond = unet_output.chunk(2)
-            delta_DSD = cond - uncond
+            promtp_cond, negative_cond = unet_output.chunk(2)
+            delta_DSD = promtp_cond - negative_cond
         
-        pred_noise = uncond + cfg_scale * delta_DSD
+        pred_noise = negative_cond + cfg_scale * delta_DSD
 
         alphas = scheduler.alphas_cumprod[idx_t].to(device)
         w = (((1 - alphas) / alphas) ** 0.5)
