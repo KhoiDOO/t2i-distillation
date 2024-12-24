@@ -17,10 +17,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--prompt", type=str, default="a DSLR photo of a dolphin")
 parser.add_argument("--extra_src_prompt", type=str, default=", oversaturated, smooth, pixelated, cartoon, foggy, hazy, blurry, bad structure, noisy, malformed")
 parser.add_argument("--extra_tgt_prompt", type=str, default=", detailed high resolution, high quality, sharp")
-parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "lucid", "lucids", "jsdg"])
+parser.add_argument("--mode", type=str, default="sds", choices=["bridge", "sds", "nfsd", "vsd", "sdsm", "lucid", "lucids", "jsdg", "asd"])
 parser.add_argument("--cfg_scale", type=float, default=100)
 parser.add_argument("--denoise_cfg_scale", type=float, default=1)
 parser.add_argument("--lr", type=float, default=0.01)
+parser.add_argument("--gamma", type=float, default=-0.75)
 parser.add_argument("--deltat", type=int, default=80)
 parser.add_argument("--deltas", type=int, default=200)
 parser.add_argument("--numt", type=int, default=2)
@@ -82,6 +83,12 @@ for step in tqdm(range(args.n_steps)):
         loss_dict = guidance.lucids_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, denoise_cfg_scale=args.denoise_cfg_scale, delta_t=args.deltat)
     elif args.mode == "lucid":
         loss_dict = guidance.lucid_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, denoise_cfg_scale=args.denoise_cfg_scale, delta_t=args.deltat, delta_s=args.deltas)
+    elif args.mode =='asd':
+        loss_dict = guidance.asd_loss(im=im, prompt=args.prompt, cfg_scale=args.cfg_scale, gamma=args.gamma)
+        lora_loss = loss_dict["lora_loss"]
+        lora_loss.backward()
+        lora_optimizer.step()
+        lora_optimizer.zero_grad()
     else:
         raise ValueError(args.mode)
     

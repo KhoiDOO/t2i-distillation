@@ -378,71 +378,6 @@ class Guidance(object):
         grad = w * (delta_C + delta_D)
         grad = torch.nan_to_num(grad)
         return {"grad": grad, "t": t}
-
-    def vsd_loss(self, im, prompt=None, cfg_scale=100):
-        device = self.device
-        scheduler = self.scheduler
-
-        # process text.
-        self.update_text_features(tgt_prompt=prompt)
-        tgt_text_embedding = self.tgt_text_feature
-        uncond_embedding = self.null_text_feature
-
-        batch_size = im.shape[0]
-        camera_condition = torch.zeros([batch_size, 4, 4], device=device)
-
-        with torch.no_grad():
-            # random timestamp
-            t = torch.randint(20, 980 + 1, [batch_size], dtype=torch.long, device=self.device)
-
-            noise = torch.randn_like(im)
-
-            latents_noisy = scheduler.add_noise(im, noise, t)
-            latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
-            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
-            with self.disable_unet_class_embedding(self.unet) as unet:
-                cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
-                noise_pred_pretrain = unet.forward(latent_model_input, torch.cat([t] * 2).to(device), encoder_hidden_states=text_embeddings,
-                    cross_attention_kwargs=cross_attention_kwargs)
-
-            # use view-independent text embeddings in LoRA
-            noise_pred_est = self.unet_lora.forward(
-                latent_model_input,
-                torch.cat([t] * 2).to(device),
-                encoder_hidden_states=torch.cat([tgt_text_embedding] * 2),
-                class_labels=torch.cat(
-                    [
-                        camera_condition.view(batch_size, -1),
-                        camera_condition.view(batch_size, -1),
-                    ],
-                    dim=0,
-                ),
-                cross_attention_kwargs={"scale": 1.0},
-            ).sample
-
-        (noise_pred_pretrain_text, noise_pred_pretrain_uncond) = noise_pred_pretrain.sample.chunk(2)
-
-        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
-        noise_pred_pretrain = noise_pred_pretrain_uncond + cfg_scale * (noise_pred_pretrain_text - noise_pred_pretrain_uncond)
-        assert self.scheduler.config.prediction_type == "epsilon"
-        if self.scheduler_lora.config.prediction_type == "v_prediction":
-            alphas_cumprod = self.scheduler_lora.alphas_cumprod.to(device=latents_noisy.device, dtype=latents_noisy.dtype)
-            alpha_t = alphas_cumprod[t] ** 0.5
-            sigma_t = (1 - alphas_cumprod[t]) ** 0.5
-
-            noise_pred_est = latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) + noise_pred_est * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
-
-        (noise_pred_est_camera, noise_pred_est_uncond) = noise_pred_est.chunk(2)
-
-        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
-        noise_pred_est = noise_pred_est_uncond + self.config.guidance_scale_lora * (noise_pred_est_camera - noise_pred_est_uncond)
-
-        w = (1 - scheduler.alphas_cumprod[t.cpu()]).view(-1, 1, 1, 1).to(device)
-        grad = w * (noise_pred_pretrain - noise_pred_est)
-
-        grad = torch.nan_to_num(grad)
-        loss_lora = self.train_lora_vsd(im, text_embeddings, camera_condition)
-        return {"lora_loss": loss_lora, "grad": grad, "t": t}
     
     def lucids_loss(self, im, prompt=None, cfg_scale=100, denoise_cfg_scale=1, delta_t=1):
         device = self.device
@@ -598,8 +533,69 @@ class Guidance(object):
         grad = w * (pred_noise - target)
         grad = torch.nan_to_num(grad)
         return {"grad": grad, "t": t}
+    
+    def vsd_loss(self, im, prompt=None, cfg_scale=7.5):
+        device = self.device
+        scheduler = self.scheduler
 
-    def train_lora_vsd(self, latents: Float[torch.Tensor, "B 4 64 64"], text_embeddings: Float[torch.Tensor, "BB 77 768"], camera_condition: Float[torch.Tensor, "B 4 4"]):
+        # process text.
+        self.update_text_features(tgt_prompt=prompt)
+        tgt_text_embedding = self.tgt_text_feature
+        uncond_embedding = self.null_text_feature
+
+        batch_size = im.shape[0]
+        camera_condition = torch.zeros([batch_size, 4, 4], device=device)
+
+        with torch.no_grad():
+            # random timestamp
+            t = torch.randint(20, 980 + 1, [batch_size], dtype=torch.long, device=self.device)
+
+            noise = torch.randn_like(im)
+
+            latents_noisy = scheduler.add_noise(im, noise, t)
+            latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
+            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
+            with self.disable_unet_class_embedding(self.unet) as unet:
+                cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
+                noise_pred_pretrain = unet.forward(latent_model_input, torch.cat([t] * 2).to(device), encoder_hidden_states=text_embeddings,
+                    cross_attention_kwargs=cross_attention_kwargs)
+
+            # use view-independent text embeddings in LoRA
+            noise_pred_est = self.unet_lora.forward(
+                latent_model_input,
+                torch.cat([t] * 2).to(device),
+                encoder_hidden_states=torch.cat([tgt_text_embedding] * 2),
+                class_labels=torch.cat([camera_condition.view(batch_size, -1), camera_condition.view(batch_size, -1)], dim=0),
+                cross_attention_kwargs={"scale": 1.0},
+            ).sample
+
+        (noise_pred_pretrain_text, noise_pred_pretrain_uncond) = noise_pred_pretrain.sample.chunk(2)
+
+        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
+        noise_pred_pretrain = noise_pred_pretrain_uncond + cfg_scale * (noise_pred_pretrain_text - noise_pred_pretrain_uncond)
+        assert self.scheduler.config.prediction_type == "epsilon"
+        if self.scheduler_lora.config.prediction_type == "v_prediction":
+            alphas_cumprod = self.scheduler_lora.alphas_cumprod.to(device=latents_noisy.device, dtype=latents_noisy.dtype)
+            alpha_t = alphas_cumprod[t] ** 0.5
+            sigma_t = (1 - alphas_cumprod[t]) ** 0.5
+
+            noise_pred_est = latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) + noise_pred_est * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
+
+        (noise_pred_est_camera, noise_pred_est_uncond) = noise_pred_est.chunk(2)
+
+        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
+        noise_pred_est = noise_pred_est_uncond + self.config.guidance_scale_lora * (noise_pred_est_camera - noise_pred_est_uncond)
+
+        w = (1 - scheduler.alphas_cumprod[t.cpu()]).view(-1, 1, 1, 1).to(device)
+        grad = w * (noise_pred_pretrain - noise_pred_est)
+
+        grad = torch.nan_to_num(grad)
+        loss_lora = self.train_lora_vsd(im, text_embeddings, camera_condition)
+        return {"lora_loss": loss_lora, "grad": grad, "t": t}
+
+    def train_lora_vsd(self, latents: Float[torch.Tensor, "B 4 64 64"], 
+                       text_embeddings: Float[torch.Tensor, "BB 77 768"], 
+                       camera_condition: Float[torch.Tensor, "B 4 4"]):
         scheduler = self.scheduler_lora
 
         B = latents.shape[0]
@@ -626,3 +622,122 @@ class Guidance(object):
             cross_attention_kwargs={"scale": 1.0},
         ).sample
         return F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+    
+    def asd_loss(self, im, prompt=None, cfg_scale=7.5, gamma=-0.75):
+        device = self.device
+        scheduler = self.scheduler
+
+        # process text.
+        self.update_text_features(tgt_prompt=prompt)
+        tgt_text_embedding = self.tgt_text_feature
+        uncond_embedding = self.null_text_feature
+
+        batch_size = im.shape[0]
+        camera_condition = torch.zeros([batch_size, 4, 4], device=device)
+
+        with torch.no_grad():
+            # random timestamp
+            t = torch.randint(20, 980 + 1, [batch_size], dtype=torch.long, device=self.device)
+
+            noise = torch.randn_like(im)
+
+            latents_noisy = scheduler.add_noise(im, noise, t)
+            latent_model_input = torch.cat([latents_noisy] * 2, dim=0)
+            text_embeddings = torch.cat([tgt_text_embedding, uncond_embedding], dim=0)
+            with self.disable_unet_class_embedding(self.unet) as unet:
+                cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
+                noise_pred_pretrain = unet.forward(latent_model_input, torch.cat([t] * 2).to(device), encoder_hidden_states=text_embeddings,
+                    cross_attention_kwargs=cross_attention_kwargs)
+
+            # use view-independent text embeddings in LoRA
+            noise_pred_est = self.unet_lora.forward(
+                latent_model_input,
+                torch.cat([t] * 2).to(device),
+                encoder_hidden_states=torch.cat([tgt_text_embedding] * 2),
+                class_labels=torch.cat([camera_condition.view(batch_size, -1), camera_condition.view(batch_size, -1)], dim=0),
+                cross_attention_kwargs={"scale": 1.0},
+            ).sample
+
+        (noise_pred_pretrain_text, noise_pred_pretrain_uncond) = noise_pred_pretrain.sample.chunk(2)
+
+        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
+        noise_pred_pretrain = noise_pred_pretrain_uncond + cfg_scale * (noise_pred_pretrain_text - noise_pred_pretrain_uncond)
+        assert self.scheduler.config.prediction_type == "epsilon"
+        if self.scheduler_lora.config.prediction_type == "v_prediction":
+            alphas_cumprod = self.scheduler_lora.alphas_cumprod.to(device=latents_noisy.device, dtype=latents_noisy.dtype)
+            alpha_t = alphas_cumprod[t] ** 0.5
+            sigma_t = (1 - alphas_cumprod[t]) ** 0.5
+
+            noise_pred_est = latent_model_input * torch.cat([sigma_t] * 2, dim=0).view(-1, 1, 1, 1) + noise_pred_est * torch.cat([alpha_t] * 2, dim=0).view(-1, 1, 1, 1)
+
+        (noise_pred_est_camera, noise_pred_est_uncond) = noise_pred_est.chunk(2)
+
+        # NOTE: guidance scale definition here is aligned with diffusers, but different from other guidance
+        noise_pred_est = noise_pred_est_uncond + self.config.guidance_scale_lora * (noise_pred_est_camera - noise_pred_est_uncond)
+
+        w = (1 - scheduler.alphas_cumprod[t.cpu()]).view(-1, 1, 1, 1).to(device)
+        grad = w * (noise_pred_pretrain - noise_pred_est)
+
+        grad = torch.nan_to_num(grad)
+        loss_lora = self.train_lora_asd(im, text_embeddings, camera_condition, gamma)
+        return {"lora_loss": loss_lora, "grad": grad, "t": t}
+
+    def train_lora_asd(self, latents: Float[torch.Tensor, "B 4 64 64"], 
+                       text_embeddings: Float[torch.Tensor, "BB 77 768"], 
+                       camera_condition: Float[torch.Tensor, "B 4 4"],
+                       gamma=-0.75):
+        scheduler = self.scheduler_lora
+
+        B = latents.shape[0]
+        latents = latents.detach().repeat(self.config.lora_n_timestamp_samples, 1, 1, 1)
+
+        text_embeddings, _ = text_embeddings.chunk(2)
+
+        t = torch.randint(
+            int(scheduler.config.num_train_timesteps * 0.0), 
+            int(scheduler.config.num_train_timesteps * 1.0),
+            [B * self.config.lora_n_timestamp_samples], 
+            dtype=torch.long, 
+            device=self.device
+        )
+
+        noise = torch.randn_like(latents)
+        noisy_latents = self.scheduler_lora.add_noise(latents, noise, t)
+
+        with torch.no_grad():
+            latent_model_input = noisy_latents
+
+            with self.disable_unet_class_embedding(self.unet) as unet:
+                cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
+                noise_pred_pretrain = unet.forward(
+                    latent_model_input, 
+                    torch.cat([t] * 2).to(self.device), 
+                    encoder_hidden_states=text_embeddings.repeat(
+                        self.config.lora_n_timestamp_samples, 1, 1
+                    ),
+                    cross_attention_kwargs=cross_attention_kwargs
+                )
+
+        text_embeddings_cond, _ = text_embeddings.chunk(2)
+        if self.config.lora_cfg_training and np.random.random() < 0.1:
+            camera_condition = torch.zeros_like(camera_condition)
+        
+        if self.scheduler_lora.config.prediction_type == "epsilon":
+            target = noise
+            target_text = noise_pred_pretrain.detach()
+        elif self.scheduler_lora.config.prediction_type == "v_prediction":
+            target = self.scheduler_lora.get_velocity(latents, noise, t)
+            target_text = self.scheduler.get_velocity(latents, noise_pred_pretrain, t).detach()
+        else:
+            raise ValueError(f"Unknown prediction type {self.scheduler_lora.config.prediction_type}")
+        
+        noise_pred = self.unet_lora.forward(
+            noisy_latents.detach(), 
+            t,
+            encoder_hidden_states=text_embeddings_cond.repeat(self.config.lora_n_timestamp_samples, 1, 1),
+            class_labels=camera_condition.view(B, -1).repeat(self.config.lora_n_timestamp_samples, 1),
+            cross_attention_kwargs={"scale": 1.0},
+        ).sample
+
+        return F.mse_loss(noise_pred.float(), target.float(), reduction="mean") + \
+            ((gamma) * F.mse_loss(noise_pred.float(), target_text.float(), reduction="mean"))
