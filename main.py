@@ -38,7 +38,9 @@ device = torch.device("cuda", args.didx)
 
 save_dir, debug_dir, cache_dir = setup(args=args)
 
-guidance = Guidance(GuidanceConfig(sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base", device=device), use_lora=(args.mode == "vsd"))
+guidance = Guidance(GuidanceConfig(
+    sd_pretrained_model_or_path="stabilityai/stable-diffusion-2-1-base", device=device), 
+    use_lora=(args.mode in ["vsd", "asd"]))
 
 stats_monitor = Stats(run_dir=save_dir)
 
