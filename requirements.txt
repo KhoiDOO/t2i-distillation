@@ -7,3 +7,4 @@ tqdm
 numpy
 imageio[pyav]
 xformers
+img2pdf
