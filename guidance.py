@@ -711,10 +711,8 @@ class Guidance(object):
                 cross_attention_kwargs = {"scale": 0.0} if self.single_model else None
                 noise_pred_pretrain = unet.forward(
                     latent_model_input, 
-                    torch.cat([t] * 2).to(self.device), 
-                    encoder_hidden_states=text_embeddings.repeat(
-                        self.config.lora_n_timestamp_samples, 1, 1
-                    ),
+                    t, 
+                    encoder_hidden_states=text_embeddings.repeat(self.config.lora_n_timestamp_samples, 1, 1),
                     cross_attention_kwargs=cross_attention_kwargs
                 )
 
