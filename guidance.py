@@ -716,7 +716,6 @@ class Guidance(object):
                     cross_attention_kwargs=cross_attention_kwargs
                 )
 
-        text_embeddings_cond, _ = text_embeddings.chunk(2)
         if self.config.lora_cfg_training and np.random.random() < 0.1:
             camera_condition = torch.zeros_like(camera_condition)
         
@@ -732,7 +731,7 @@ class Guidance(object):
         noise_pred = self.unet_lora.forward(
             noisy_latents.detach(), 
             t,
-            encoder_hidden_states=text_embeddings_cond.repeat(self.config.lora_n_timestamp_samples, 1, 1),
+            encoder_hidden_states=text_embeddings.repeat(self.config.lora_n_timestamp_samples, 1, 1),
             class_labels=camera_condition.view(B, -1).repeat(self.config.lora_n_timestamp_samples, 1),
             cross_attention_kwargs={"scale": 1.0},
         ).sample
