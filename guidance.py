@@ -714,7 +714,7 @@ class Guidance(object):
                     t, 
                     encoder_hidden_states=text_embeddings.repeat(self.config.lora_n_timestamp_samples, 1, 1),
                     cross_attention_kwargs=cross_attention_kwargs
-                )
+                ).sample
 
         if self.config.lora_cfg_training and np.random.random() < 0.1:
             camera_condition = torch.zeros_like(camera_condition)
