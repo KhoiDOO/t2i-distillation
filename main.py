@@ -54,7 +54,7 @@ im.requires_grad_(True)
 im.retain_grad()
 
 im_optimizer = torch.optim.AdamW([im], lr=args.lr, betas=(0.9, 0.99), eps=1e-15)
-if args.mode == "vsd":
+if args.mode in ["vsd", "asd"]:
     lora_optimizer = torch.optim.AdamW([{"params": guidance.unet_lora.parameters(), "lr": 3e-4}],weight_decay=0)
 
 im_opts = []
