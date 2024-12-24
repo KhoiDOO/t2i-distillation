@@ -7,7 +7,7 @@ from tqdm import tqdm
 if __name__ == '__main__':
     save_dir = f'{os.getcwd()}/results'
 
-    exp_dirs = glob(f'{save_dir}/*/*/*')
+    exp_dirs = glob(f'{save_dir}/*/*/*/*')
 
     for exp_dir in tqdm(exp_dirs):
         debug_dir = os.path.join(exp_dir, 'debug')
