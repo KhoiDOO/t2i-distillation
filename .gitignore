@@ -163,6 +163,7 @@ cython_debug/
 
 /results
 /extract_results
+*.zip
 
 # *.png
 # *.json
