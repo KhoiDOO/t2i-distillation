@@ -28,7 +28,7 @@ parser.add_argument("--numt", type=int, default=2)
 
 parser.add_argument("--didx", type=int, default=0)
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--n_steps", type=int, default=5000)
+parser.add_argument("--n_steps", type=int, default=1000)
 parser.add_argument("--stage_two_start_step", type=int, default=500)
 parser.add_argument("--snap", type=int, default=100)
 parser.add_argument("--fps", type=int, default=10)
