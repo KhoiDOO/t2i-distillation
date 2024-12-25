@@ -161,8 +161,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# /results
+/results
+/extract_results
 
-*.png
-*.json
-*.mp4
+# *.png
+# *.json
+# *.mp4
