@@ -2,6 +2,7 @@ import img2pdf
 import os
 import json
 import shutil
+import argparse
 
 from glob import glob
 from tqdm import tqdm
@@ -18,7 +19,7 @@ to_config = {
 
 to_steps = {
     'bridge' : [1000],
-    'jsdg' : [x * 1000 for x in range(1, 21)],
+    'jsdg' : [5000],
     'lucid' : [1000],
     'vsd' : [1000],
     'asd' : [1000],
@@ -27,6 +28,11 @@ to_steps = {
 
 if __name__ == '__main__':
     save_dir = 'results'
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--reset', action='store_true')
+
+    args = parser.parse_args()
 
     if not os.path.exists(save_dir):
         print('Found no save directory: ./results')
@@ -55,10 +61,11 @@ if __name__ == '__main__':
         cfgs = to_config[mode]
         steps = to_steps[mode]
 
-        # if os.path.exists(os.path.join(exp_dir, 'pdfs')):
-        #     shutil.rmtree(os.path.join(exp_dir, 'pdfs'))
-
         pdf_dir = os.path.join(exp_dir, 'pdfs/visual')
+
+        if os.path.exists(pdf_dir) and args.reset:
+            shutil.rmtree(pdf_dir)
+
         os.makedirs(pdf_dir, exist_ok=True)
         
         for cfg in cfgs:
